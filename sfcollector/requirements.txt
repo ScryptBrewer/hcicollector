@@ -1,0 +1,3 @@
+solidfire-sdk-python
+requests 
+graphyte 
