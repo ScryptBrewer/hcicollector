@@ -1,8 +1,9 @@
 #!/usr/bin/python
 # solidfire_graphite_collector_v3.py
 #
-# Version 1.0.3
+# Version 1.0.4
 # Author: Aaron Patten
+# Update: John Olson
 # Original author: Colin Bieberstein
 # Original contributors: Pablo Luis Zorzoli, Davide Obbi
 #
@@ -19,13 +20,23 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+# 
+#Olson - Version 1.1
+#               - Includes Main function
+#               - Added default environmental variables to use with compose
+#               - Created while loop for operation without wrapper script
+#               - Updated variable to_graphite to global to address main logic
+#               - Changed default logging to standard Error standard out added --log or -l to  STDOUT STDERR vs logfile
+#               - Added the following read from environmental variables SOLIDFIRE, SOLIDFIREUSER, SOLIDFIREPASSWORD
+
+
 import argparse
 import time
 import graphyte
 from solidfire.factory import ElementFactory
 import solidfire.common
 import logging
-
+import os
 
 def send_cluster_faults(sf_element_factory, prefix):
     """
@@ -264,53 +275,69 @@ def to_num(metric):
     finally:
         return x
 
+def main():
+    # Parse commandline arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument('-s', '--solidfire', default=os.environ.get('SOLIDFIRE', None),
+                        help='hostname of SolidFire array from which metrics should be collected')
+    parser.add_argument('-u', '--username', default=os.environ.get('SOLIDFIREUSER', None),
+                        help='username for SolidFire array. default admin')
+    parser.add_argument('-p', '--password', default=os.environ.get('SOLIDFIREPASSWORD', None),
+                        help='password for SolidFire array. default password')
+    parser.add_argument('-g', '--graphite', default='graphite',
+                        help='hostname of Graphite server to send to. default localhost. "debug" sends metrics to logfile')
+    parser.add_argument('-t', '--port', type=int, default=2003,
+                        help='port to send message to. default 2003. if the --graphite is set to debug can be omitted')
+    parser.add_argument('-m', '--metricroot', default='netapp.solidfire.cluster',
+                        help='graphite metric root. default netapp.solidfire.cluster')
+    parser.add_argument('-l', '--log', default=True,
+                        help='logfile. default: True')
+    parser.add_argument('-f', '--logfile', type=argparse.FileType('w'),
+                        help='logfile. Specifiy a Log file vs stdrr or stdout')
+    args = parser.parse_args()
 
-# Parse commandline arguments
-parser = argparse.ArgumentParser()
-parser.add_argument('-s', '--solidfire',
-                    help='hostname of SolidFire array from which metrics should be collected')
-parser.add_argument('-u', '--username', default='admin',
-                    help='username for SolidFire array. default admin')
-parser.add_argument('-p', '--password', default='password',
-                    help='password for SolidFire array. default password')
-parser.add_argument('-g', '--graphite', default='localhost',
-                    help='hostname of Graphite server to send to. default localhost. "debug" sends metrics to logfile')
-parser.add_argument('-t', '--port', type=int, default=2003,
-                    help='port to send message to. default 2003. if the --graphite is set to debug can be omitted')
-parser.add_argument('-m', '--metricroot', default='netapp.solidfire.cluster',
-                    help='graphite metric root. default netapp.solidfire.cluster')
-parser.add_argument('-l', '--logfile', default='/tmp/solidfire-graphite-collector.log',
-                    help='logfile. default: /tmp/solidfire-graphite-collector.log')
-args = parser.parse_args()
+    global to_graphite
+    to_graphite = True
+    # Logger module configuration
+    if bool(args.log):
+        LOG = logging.getLogger('solidfire_graphite_collector.py')
+        if args.logfile:
+            logging.basicConfig(filename=args.logfile, level=logging.DEBUG, format='%(asctime)s %(message)s')
+        else:
+            logging.basicConfig(level=logging.DEBUG, format='%(asctime)s %(message)s')
+        LOG.warning("Starting Collector script as a daemon.  No console output possible.")
 
-to_graphite = True
-# Logger module configuration
-if args.logfile:
-    LOG = logging.getLogger('solidfire_graphite_collector.py')
-    logging.basicConfig(filename=args.logfile, level=logging.DEBUG, format='%(asctime)s %(message)s')
-    LOG.warning("Starting Collector script as a daemon.  No console output possible.")
+    # Initialize graphyte sender
+    if args.graphite == "debug":
+        LOG.warning("Starting collector in debug mode. All the metrics will be shipped to logfile")
+        to_graphite = False
+    else:
+        graphyte.init(args.graphite, port=args.port, prefix=args.metricroot)
 
-# Initialize graphyte sender
-if args.graphite == "debug":
-    LOG.warning("Starting collector in debug mode. All the metrics will be shipped to logfile")
-    to_graphite = False
-else:
-    graphyte.init(args.graphite, port=args.port, prefix=args.metricroot)
 
-LOG.info("Metrics Collection for array: {0}".format(args.solidfire))
-try:
-    sfe = ElementFactory.create(args.solidfire, args.username, args.password)
-    sfe.timeout(15)
-    cluster_name = sfe.get_cluster_info().to_json()['clusterInfo']['name']
-    send_cluster_stats(sfe, cluster_name)
-    send_cluster_faults(sfe, cluster_name)
-    send_cluster_capacity(sfe, cluster_name)
-    send_node_stats(sfe, cluster_name + '.node')
-    send_volume_stats(sfe, cluster_name)
-    send_drive_stats(sfe, cluster_name)
-except solidfire.common.ApiServerError as e:
-    LOG.warning("ApiServerError: {0}".format(str(e)))
-except Exception as e:
-    LOG.warning("General Exception: {0}".format(str(e)))
+    while (1):
+        LOG.info("Metrics Collection for array: {0}".format(args.solidfire))
+        try:
+            sfe = ElementFactory.create(args.solidfire, args.username, args.password)
+            sfe.timeout(15)
+            cluster_name = sfe.get_cluster_info().to_json()['clusterInfo']['name']
+            send_cluster_stats(sfe, cluster_name)
+            send_cluster_faults(sfe, cluster_name)
+            send_cluster_capacity(sfe, cluster_name)
+            send_node_stats(sfe, cluster_name + '.node')
+            send_volume_stats(sfe, cluster_name)
+            send_drive_stats(sfe, cluster_name)
+        except solidfire.common.ApiServerError as e:
+            LOG.warning("ApiServerError: {0}".format(str(e)))
+            break
+        except Exception as e:
+            LOG.warning("General Exception: {0}".format(str(e)))
+            break
+        os.system("graphite")
+        time.sleep(60)
 
-sfe = None
+
+    sfe = None
+
+if __name__ == '__main__':
+    main()
